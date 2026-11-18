@@ -1,0 +1,32 @@
+maintainer="Jonathan Scott <18604574+jscottii@users.noreply.github.com>"
+pkgname=quicknotes-fan
+pkgver=1.1.0
+pkgrel=0
+upstream_author="jscottii"
+category="ui"
+pkgdesc="Tap the bottom-left corner with a finger to open a fan of up to 5 pinned notebooks from anywhere."
+url="https://github.com/$upstream_author/quicknotes-rm"
+arch="noarch"
+license="MIT"
+depends="qt-resource-rebuilder qt-command-executor<20 !rm1 !rm2 remarkable-os>=3.28 remarkable-os<3.30"
+_commit="621bb5a1673f4f015d2f78b4c641d6f019502145"
+readmeurl="https://raw.githubusercontent.com/$upstream_author/quicknotes-rm/$_commit/README.md"
+source="
+https://raw.githubusercontent.com/$upstream_author/quicknotes-rm/$_commit/quickNotes.qmd
+https://raw.githubusercontent.com/$upstream_author/quicknotes-rm/$_commit/LICENSE
+"
+options='strip tracedeps'
+
+package() {
+	install -Dm644 "$srcdir"/quickNotes.qmd \
+		"$pkgdir"/home/root/xovi/exthome/qt-resource-rebuilder/quickNotes.qmd
+
+	install -Dm644 "$srcdir"/LICENSE \
+		"$pkgdir"/home/root/.vellum/licenses/$pkgname/LICENSE
+	echo "https://github.com/$upstream_author/quicknotes-rm" > \
+		"$pkgdir"/home/root/.vellum/licenses/$pkgname/SOURCES
+}
+sha512sums="
+76ba3e382733b0ca4e07b16904ba05bfd032f9bff0cc8237cddd7b3e7be8b972c3a536f92169d890e23c212eb0e6db85504122dcc61c811f29e416b61f66d50d  quickNotes.qmd
+8fa3f53d48842c01f6f53907f412b7ab0c3fb14f7d44e7225875f1400a3c64113673094c784c3470b25a4cd5f9877d5293db6202e9a932eb4bb4456763f797f2  LICENSE
+"
