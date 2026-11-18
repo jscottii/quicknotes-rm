@@ -1,0 +1,663 @@
+; Quick Notes corner fan for reMarkable Paper Pro Move
+; ------------------------------------------------------------
+; Tap the bottom-left corner with a finger -> a quarter-circle fan of up to 5
+; pinned notebooks pops up. Tap one to open it. A "+" bubble appears while
+; fewer than 5 are pinned; it opens a picker of your existing notebooks.
+; Press and hold a bubble for Rename / Remove. Renaming uses a built-in
+; on-screen keyboard; the label is stored only in Quick Notes (the notebook
+; keeps its own name). Bubbles stay centred on the arc as you add more.
+;
+; Pen input passes straight through the corner (finger taps only).
+;
+; Pins are stored in /home/root/.local/share/quicknotes/slots.json
+;
+; Requires: xovi + qt-resource-rebuilder + qt-command-executor
+; Plaintext identifiers resolve via the hashtab built by xovi/rebuild_hashtable.
+; Tested on 3.28.0.172. The 3.29 lines are prepared for the next update and are
+; untested: on 3.29 notebooks open through windowNavigator ("legacydevice/window/main").
+
+VERSION 3.28.0.172
+VERSION 3.29.0.148
+VERSION 3.29.1.0
+
+AFFECT /qml/device/view/main/MainView.qml
+    IMPORT net.asivery.CommandExecutor 1.0
+
+    TRAVERSE ?#root
+        LOCATE AFTER ALL
+        INSERT {
+            CommandExecutor {
+                id: qnExec
+            }
+
+            Timer {
+                id: qnBootTimer
+                interval: 800
+                running: true
+                repeat: false
+                onTriggered: {
+                    var host = root.Window.window ? root.Window.window.contentItem : root;
+                    for (var i = 0; i < host.children.length; i++) {
+                        if (host.children[i].objectName === "quickNotesOverlay") return;
+                    }
+                    var o = qnOverlayComp.createObject(host, {});
+                    console.log("[quicknotes] overlay created: " + !!o
+                        + " explorer=" + (typeof root.explorer)
+                        + " windowNavigator=" + (typeof root.windowNavigator)
+                        + " LibraryController=" + (typeof LibraryController));
+                }
+            }
+
+            Component {
+                id: qnOverlayComp
+
+                Item {
+                    id: qn
+                    objectName: "quickNotesOverlay"
+                    anchors.fill: parent
+                    z: 999999
+
+                    readonly property int maxSlots: 5
+                    readonly property string dataDir: "/home/root/.local/share/quicknotes"
+                    readonly property string slotsFile: dataDir + "/slots.json"
+                    readonly property string xochitlDir: "/home/root/.local/share/remarkable/xochitl"
+
+                    readonly property real unit: Math.min(width, height) / 10
+                    readonly property real hotspot: unit * 0.85
+                    readonly property real bubble: unit * 1.2
+                    readonly property real fanRadius: unit * 3.3
+
+                    property bool open: false
+                    property int menuIndex: -1
+                    property int renameIndex: -1
+                    property string draft: ""
+                    property bool shiftOn: true
+                    readonly property int maxLabel: 24
+                    readonly property real arcStep: Math.PI / 10
+                    property bool pickerOpen: false
+                    property var slots: []
+
+                    readonly property int bubbleCount: {
+                        return slots.length + (slots.length < maxSlots ? 1 : 0);
+                    }
+
+                    // ---------- shell helpers ----------
+                    function run(cmd, args) {
+                        try {
+                            var r = qnExec.executeCommand(cmd, args);
+                            if (typeof r === "string") r = JSON.parse(r);
+                            return r || { stdout: "", stderr: "" };
+                        } catch (e) {
+                            console.log("[quicknotes] command failed: " + e);
+                            return { stdout: "", stderr: "" + e };
+                        }
+                    }
+
+                    function loadSlots() {
+                        var r = run("cat", [slotsFile]);
+                        var list = [];
+                        try { list = JSON.parse(r.stdout || "[]"); } catch (e) { list = []; }
+                        if (!Array.isArray(list)) list = [];
+                        slots = list.slice(0, maxSlots);
+                    }
+
+                    function saveSlots(list) {
+                        slots = list.slice(0, maxSlots);
+                        run("sh", ["-c", "mkdir -p \"$2\" && printf '%s' \"$1\" > \"$3.tmp\" && mv \"$3.tmp\" \"$3\"",
+                                   "sh", JSON.stringify(slots), dataDir, slotsFile]);
+                    }
+
+                    function addSlot(id, name) {
+                        var list = slots.slice();
+                        for (var i = 0; i < list.length; i++) if (list[i].id === id) return;
+                        if (list.length >= maxSlots) return;
+                        list.push({ id: id, name: name });
+                        saveSlots(list);
+                    }
+
+                    function removeSlot(index) {
+                        var list = slots.slice();
+                        list.splice(index, 1);
+                        saveSlots(list);
+                    }
+
+                    function labelFor(slot) {
+                        if (!slot) return "";
+                        return slot.label ? slot.label : slot.name;
+                    }
+
+                    function startRename(index) {
+                        menuIndex = -1;
+                        renameIndex = index;
+                        draft = slots[index] ? labelFor(slots[index]) : "";
+                        shiftOn = draft.length === 0;
+                    }
+
+                    function finishRename(save) {
+                        if (save && renameIndex >= 0 && renameIndex < slots.length) {
+                            var list = slots.slice();
+                            var item = { id: list[renameIndex].id, name: list[renameIndex].name };
+                            var t = draft.trim();
+                            if (t.length > 0 && t !== item.name) item.label = t;
+                            list[renameIndex] = item;
+                            saveSlots(list);
+                        }
+                        renameIndex = -1;
+                    }
+
+                    function typeKey(k) {
+                        if (draft.length >= maxLabel) return;
+                        draft = draft + (shiftOn ? k.toUpperCase() : k);
+                        shiftOn = false;
+                    }
+
+                    function closeAll() {
+                        open = false;
+                        menuIndex = -1;
+                    }
+
+                    // Centre the bubbles on the 45-degree line, spaced evenly.
+                    function bubbleAngle(i) {
+                        return Math.PI / 4 + (i - (bubbleCount - 1) / 2) * arcStep;
+                    }
+
+                    // ---------- opening a notebook ----------
+                    function openDoc(id) {
+                        closeAll();
+                        if (typeof Library !== "undefined" && Library.entryForId && !Library.entryForId(id)) {
+                            console.log("[quicknotes] document not found: " + id);
+                            return;
+                        }
+                        try {
+                            if (root.explorer && typeof root.explorer.open === "function") {
+                                root.explorer.open(id);
+                                return;
+                            }
+                        } catch (e) { console.log("[quicknotes] explorer.open failed: " + e); }
+                        try {
+                            root.windowNavigator.open("legacydevice/window/main", { documentId: id });
+                            return;
+                        } catch (e2) { console.log("[quicknotes] windowNavigator legacy route failed: " + e2); }
+                        try {
+                            root.windowNavigator.open("legacydevice/window/main", { id: id });
+                        } catch (e3) { console.log("[quicknotes] all open routes failed: " + e3); }
+                    }
+
+                    // ---------- notebook list for the picker ----------
+                    property var allDocs: []
+                    property string quickNotesFolderId: ""
+                    property int pickerPage: 0
+                    readonly property int perPage: 8
+                    readonly property var pickable: {
+                        var pinned = {};
+                        for (var i = 0; i < slots.length; i++) pinned[slots[i].id] = true;
+                        return allDocs.filter(function (d) { return !pinned[d.id]; });
+                    }
+                    readonly property int pageCount: Math.max(1, Math.ceil(pickable.length / perPage))
+                    readonly property var pageItems: pickable.slice(pickerPage * perPage, (pickerPage + 1) * perPage)
+
+                    function loadDocs() {
+                        var script = "cd \"$1\" || exit 0; for f in *.metadata; do "
+                                   + "printf '%s\\t' \"${f%.metadata}\"; tr -d '\\n' < \"$f\"; echo; done";
+                        var r = run("sh", ["-c", script, "sh", xochitlDir]);
+                        var lines = (r.stdout || "").split("\n");
+                        var docs = [], folders = {};
+                        for (var i = 0; i < lines.length; i++) {
+                            var tab = lines[i].indexOf("\t");
+                            if (tab < 0) continue;
+                            var id = lines[i].substring(0, tab);
+                            var m;
+                            try { m = JSON.parse(lines[i].substring(tab + 1)); } catch (e) { continue; }
+                            if (!m || m.deleted || m.parent === "trash") continue;
+                            if (m.type === "CollectionType") {
+                                folders[id] = m.visibleName;
+                                if (m.visibleName === "Quick Notes" && !m.parent) quickNotesFolderId = id;
+                            }
+                            else if (m.type === "DocumentType")
+                                docs.push({ id: id, name: m.visibleName || "Untitled",
+                                            parent: m.parent || "", modified: Number(m.lastModified || 0) });
+                        }
+                        for (var j = 0; j < docs.length; j++)
+                            docs[j].folder = docs[j].parent ? (folders[docs[j].parent] || "") : "My files";
+                        docs.sort(function (a, b) { return b.modified - a.modified; });
+                        allDocs = docs;
+                        pickerPage = 0;
+                    }
+
+                    function createQuickNote() {
+                        if (typeof LibraryController === "undefined" || typeof Library === "undefined") {
+                            console.log("[quicknotes] LibraryController not available");
+                            return;
+                        }
+                        try {
+                            var folderId = qn.quickNotesFolderId;
+                            if (!folderId || !Library.entryForId(folderId))
+                                folderId = Library.createCollectionWrapper("", "Quick Notes");
+                            var name = "Quick note " + Qt.formatDateTime(new Date(), "MMM d h:mm AP");
+                            var id = "" + LibraryController.createDocument(folderId, name);
+                            if (id) {
+                                addSlot(id, name);
+                                pickerOpen = false;
+                                openDoc(id);
+                            }
+                        } catch (e) {
+                            console.log("[quicknotes] create failed: " + e);
+                        }
+                    }
+
+                    Component.onCompleted: loadSlots()
+
+                    // ---------- corner hotspot (finger only) ----------
+                    Item {
+                        id: corner
+                        x: 0
+                        y: qn.height - height
+                        width: qn.hotspot
+                        height: qn.hotspot
+                        visible: (!qn.pickerOpen && qn.renameIndex < 0)
+
+                        Rectangle {
+                            width: qn.hotspot * 0.5
+                            height: width
+                            radius: width / 2
+                            x: -width / 2
+                            y: parent.height - height / 2
+                            color: "transparent"
+                            border.width: 2
+                            border.color: "#000000"
+                            opacity: qn.open ? 0 : 0.35
+                        }
+
+                        TapHandler {
+                            acceptedDevices: PointerDevice.TouchScreen
+                            onTapped: {
+                                if (qn.open) { qn.closeAll(); }
+                                else { qn.loadSlots(); qn.open = true; }
+                            }
+                        }
+                    }
+
+                    // ---------- tap-outside-to-close backdrop ----------
+                    MouseArea {
+                        anchors.fill: parent
+                        visible: (qn.open && !qn.pickerOpen && qn.renameIndex < 0)
+                        onClicked: { qn.closeAll(); }
+                    }
+
+                    // ---------- the fan ----------
+                    Rectangle {
+                        visible: (qn.open && !qn.pickerOpen && qn.renameIndex < 0)
+                        width: (qn.fanRadius + qn.bubble) * 2
+                        height: width
+                        radius: width / 2
+                        x: -width / 2
+                        y: qn.height - height / 2
+                        color: "#ffffff"
+                        border.width: 2
+                        border.color: "#000000"
+                    }
+
+                    Repeater {
+                        model: (qn.open && !qn.pickerOpen && qn.renameIndex < 0) ? qn.bubbleCount : 0
+
+                        Rectangle {
+                            id: bubbleItem
+                            readonly property bool isPlus: index >= qn.slots.length
+                            readonly property bool isSelected: index === qn.menuIndex
+                            readonly property real angle: qn.bubbleAngle(index)
+                            width: qn.bubble
+                            height: qn.bubble
+                            radius: width / 2
+                            x: qn.unit * 0.35 + qn.fanRadius * Math.cos(angle) - width / 2
+                            y: qn.height - qn.unit * 0.35 - qn.fanRadius * Math.sin(angle) - height / 2
+                            color: (isPlus || isSelected) ? "#ffffff" : "#000000"
+                            border.width: isSelected ? 6 : 3
+                            border.color: "#000000"
+
+                            Text {
+                                anchors.fill: parent
+                                anchors.margins: parent.width * 0.12
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                                wrapMode: Text.WordWrap
+                                elide: Text.ElideRight
+                                maximumLineCount: 2
+                                font.pixelSize: bubbleItem.isPlus ? parent.width * 0.5 : parent.width * 0.17
+                                color: (bubbleItem.isPlus || bubbleItem.isSelected) ? "#000000" : "#ffffff"
+                                text: {
+                                    if (bubbleItem.isPlus) return "+";
+                                    return qn.labelFor(qn.slots[index]);
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: {
+                                    if (qn.menuIndex >= 0) {
+                                        qn.menuIndex = -1;
+                                    } else if (bubbleItem.isPlus) {
+                                        qn.loadDocs();
+                                        qn.pickerOpen = true;
+                                    } else {
+                                        qn.openDoc(qn.slots[index].id);
+                                    }
+                                }
+                                onPressAndHold: {
+                                    if (!bubbleItem.isPlus) { qn.menuIndex = index; }
+                                }
+                            }
+                        }
+                    }
+
+                    // ---------- long-press menu: Rename / Remove ----------
+                    Rectangle {
+                        id: bubbleMenu
+                        visible: (qn.open && qn.menuIndex >= 0 && qn.renameIndex < 0 && !qn.pickerOpen)
+                        width: qn.unit * 4.2
+                        height: menuColumn.height + qn.unit * 0.6
+                        x: qn.fanRadius + qn.bubble * 1.4
+                        y: qn.height - height - qn.unit * 0.6
+                        radius: qn.unit * 0.2
+                        color: "#ffffff"
+                        border.width: 3
+                        border.color: "#000000"
+
+                        MouseArea { anchors.fill: parent }
+
+                        Column {
+                            id: menuColumn
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.top: parent.top
+                            anchors.topMargin: qn.unit * 0.3
+                            width: parent.width - qn.unit * 0.6
+                            spacing: qn.unit * 0.2
+
+                            Text {
+                                width: parent.width
+                                horizontalAlignment: Text.AlignHCenter
+                                elide: Text.ElideRight
+                                text: qn.labelFor(qn.slots[qn.menuIndex])
+                                font.pixelSize: qn.unit * 0.32
+                                color: "#000000"
+                            }
+                            Repeater {
+                                model: ["Rename", "Remove", "Cancel"]
+                                Rectangle {
+                                    width: menuColumn.width
+                                    height: qn.unit * 0.8
+                                    radius: height / 2
+                                    color: index === 0 ? "#000000" : "#ffffff"
+                                    border.width: 2
+                                    border.color: "#000000"
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData
+                                        font.pixelSize: qn.unit * 0.3
+                                        color: index === 0 ? "#ffffff" : "#000000"
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: {
+                                            var i = qn.menuIndex;
+                                            if (index === 0) { qn.startRename(i); }
+                                            else if (index === 1) { qn.menuIndex = -1; qn.removeSlot(i); }
+                                            else { qn.menuIndex = -1; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ---------- rename editor with built-in keyboard ----------
+                    Rectangle {
+                        id: renameEditor
+                        anchors.fill: parent
+                        visible: qn.renameIndex >= 0
+                        color: "#ffffff"
+
+                        MouseArea { anchors.fill: parent }
+
+                        Column {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.top: parent.top
+                            anchors.topMargin: qn.unit * 0.8
+                            width: parent.width - qn.unit
+                            spacing: qn.unit * 0.3
+
+                            Text {
+                                width: parent.width
+                                text: "Rename bubble"
+                                font.pixelSize: qn.unit * 0.4
+                                color: "#000000"
+                            }
+                            Text {
+                                width: parent.width
+                                elide: Text.ElideRight
+                                text: "Notebook: " + (qn.slots[qn.renameIndex] ? qn.slots[qn.renameIndex].name : "")
+                                font.pixelSize: qn.unit * 0.26
+                                color: "#555555"
+                            }
+                            Rectangle {
+                                width: parent.width
+                                height: qn.unit * 1.0
+                                radius: qn.unit * 0.12
+                                border.width: 3
+                                border.color: "#000000"
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: qn.unit * 0.3
+                                    text: qn.draft + "|"
+                                    font.pixelSize: qn.unit * 0.42
+                                    color: "#000000"
+                                }
+                            }
+                            Text {
+                                width: parent.width
+                                text: "Leave it empty to use the notebook name. " + qn.draft.length + "/" + qn.maxLabel
+                                font.pixelSize: qn.unit * 0.24
+                                color: "#555555"
+                            }
+                        }
+
+                        Column {
+                            id: keyboard
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.bottom: parent.bottom
+                            anchors.bottomMargin: qn.unit * 0.6
+                            spacing: qn.unit * 0.15
+                            readonly property real keyW: Math.min(qn.width / 11, qn.unit * 0.9)
+                            readonly property real keyH: qn.unit * 0.95
+
+                            Repeater {
+                                model: ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm-'"]
+                                Row {
+                                    id: keyRow
+                                    property string rowKeys: modelData
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    spacing: keyboard.keyW * 0.08
+                                    Repeater {
+                                        model: keyRow.rowKeys.split("")
+                                        Rectangle {
+                                            width: keyboard.keyW
+                                            height: keyboard.keyH
+                                            radius: qn.unit * 0.1
+                                            border.width: 2
+                                            border.color: "#000000"
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: qn.shiftOn ? modelData.toUpperCase() : modelData
+                                                font.pixelSize: qn.unit * 0.38
+                                                color: "#000000"
+                                            }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                onClicked: { qn.typeKey(modelData); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Row {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                spacing: keyboard.keyW * 0.08
+                                Repeater {
+                                    model: ["Shift", "Space", "Del", "Clear", "Cancel", "Done"]
+                                    Rectangle {
+                                        width: modelData === "Space" ? keyboard.keyW * 3 : keyboard.keyW * 1.35
+                                        height: keyboard.keyH
+                                        radius: qn.unit * 0.1
+                                        color: (modelData === "Done" || (modelData === "Shift" && qn.shiftOn)) ? "#000000" : "#ffffff"
+                                        border.width: 2
+                                        border.color: "#000000"
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: modelData
+                                            font.pixelSize: qn.unit * 0.26
+                                            color: (modelData === "Done" || (modelData === "Shift" && qn.shiftOn)) ? "#ffffff" : "#000000"
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: {
+                                                if (modelData === "Shift") { qn.shiftOn = !qn.shiftOn; }
+                                                else if (modelData === "Space") { if (qn.draft.length < qn.maxLabel) { qn.draft = qn.draft + " "; } }
+                                                else if (modelData === "Del") { qn.draft = qn.draft.slice(0, -1); }
+                                                else if (modelData === "Clear") { qn.draft = ""; qn.shiftOn = true; }
+                                                else if (modelData === "Cancel") { qn.finishRename(false); }
+                                                else { qn.finishRename(true); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ---------- notebook picker (paged, E Ink friendly) ----------
+                    Rectangle {
+                        id: picker
+                        anchors.fill: parent
+                        visible: qn.pickerOpen
+                        color: "#ffffff"
+
+                        MouseArea { anchors.fill: parent }
+
+                        Column {
+                            anchors.fill: parent
+                            anchors.margins: qn.unit * 0.5
+                            spacing: qn.unit * 0.2
+
+                            Item {
+                                width: parent.width
+                                height: qn.unit * 0.9
+                                Text {
+                                    anchors.left: parent.left
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "Pin a notebook (" + qn.slots.length + "/" + qn.maxSlots + ")"
+                                    font.pixelSize: qn.unit * 0.4
+                                    color: "#000000"
+                                }
+                                Rectangle {
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: qn.unit * 1.6
+                                    height: qn.unit * 0.75
+                                    radius: height / 2
+                                    border.width: 2
+                                    border.color: "#000000"
+                                    Text { anchors.centerIn: parent; text: "Cancel"; font.pixelSize: qn.unit * 0.3; color: "#000000" }
+                                    MouseArea { anchors.fill: parent; onClicked: { qn.pickerOpen = false; } }
+                                }
+                            }
+
+                            Rectangle {
+                                width: parent.width
+                                height: qn.unit * 0.9
+                                radius: qn.unit * 0.15
+                                color: "#000000"
+                                visible: (typeof LibraryController !== "undefined")
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "+ New note in \"Quick Notes\" folder"
+                                    font.pixelSize: qn.unit * 0.32
+                                    color: "#ffffff"
+                                }
+                                MouseArea { anchors.fill: parent; onClicked: qn.createQuickNote() }
+                            }
+
+                            Repeater {
+                                model: qn.pageItems
+                                Rectangle {
+                                    width: parent.width
+                                    height: qn.unit * 1.05
+                                    color: "#ffffff"
+                                    border.width: 1
+                                    border.color: "#000000"
+                                    radius: qn.unit * 0.12
+                                    Column {
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        anchors.leftMargin: qn.unit * 0.3
+                                        anchors.rightMargin: qn.unit * 0.3
+                                        Text {
+                                            width: parent.width
+                                            text: modelData.name
+                                            elide: Text.ElideRight
+                                            font.pixelSize: qn.unit * 0.34
+                                            color: "#000000"
+                                        }
+                                        Text {
+                                            width: parent.width
+                                            text: modelData.folder
+                                            elide: Text.ElideRight
+                                            font.pixelSize: qn.unit * 0.24
+                                            color: "#555555"
+                                        }
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: {
+                                            qn.addSlot(modelData.id, modelData.name);
+                                            qn.pickerOpen = false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Row {
+                            anchors.bottom: parent.bottom
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.bottomMargin: qn.unit * 0.5
+                            spacing: qn.unit * 0.5
+
+                            Rectangle {
+                                width: qn.unit * 1.6; height: qn.unit * 0.75; radius: height / 2
+                                border.width: 2; border.color: "#000000"
+                                opacity: qn.pickerPage > 0 ? 1 : 0.3
+                                Text { anchors.centerIn: parent; text: "Prev"; font.pixelSize: qn.unit * 0.3; color: "#000000" }
+                                MouseArea { anchors.fill: parent; onClicked: { if (qn.pickerPage > 0) qn.pickerPage--; } }
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: (qn.pickerPage + 1) + " / " + qn.pageCount
+                                font.pixelSize: qn.unit * 0.3
+                                color: "#000000"
+                            }
+                            Rectangle {
+                                width: qn.unit * 1.6; height: qn.unit * 0.75; radius: height / 2
+                                border.width: 2; border.color: "#000000"
+                                opacity: qn.pickerPage < qn.pageCount - 1 ? 1 : 0.3
+                                Text { anchors.centerIn: parent; text: "Next"; font.pixelSize: qn.unit * 0.3; color: "#000000" }
+                                MouseArea { anchors.fill: parent; onClicked: { if (qn.pickerPage < qn.pageCount - 1) qn.pickerPage++; } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    END TRAVERSE
+END AFFECT
