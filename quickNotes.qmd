@@ -104,9 +104,9 @@ AFFECT /qml/device/view/main/MainView.qml
 
                     readonly property real unit: Math.min(width, height) / 10
                     readonly property real hotspot: unit * 0.85
-                    readonly property real bubble: unit * 1.1
-                    readonly property real fanRadius: unit * 5.0
-                    readonly property real fanInset: unit * 0.75
+                    readonly property real bubble: unit * 0.66
+                    readonly property real fanRadius: unit * 3.0
+                    readonly property real fanInset: unit * 0.45
 
                     property bool open: false
                     property int menuIndex: -1
@@ -363,7 +363,7 @@ AFFECT /qml/device/view/main/MainView.qml
                                 wrapMode: Text.WordWrap
                                 elide: Text.ElideRight
                                 maximumLineCount: 2
-                                font.pixelSize: bubbleItem.isPlus ? parent.width * 0.5 : parent.width * 0.17
+                                font.pixelSize: bubbleItem.isPlus ? parent.width * 0.5 : qn.unit * 0.17
                                 color: (bubbleItem.isPlus || bubbleItem.isSelected) ? "#000000" : "#ffffff"
                                 text: {
                                     if (bubbleItem.isPlus) return "+";
