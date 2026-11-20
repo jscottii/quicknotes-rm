@@ -13,6 +13,7 @@
 ;
 ; Requires: xovi + qt-resource-rebuilder + qt-command-executor
 ; Plaintext identifiers resolve via the hashtab built by xovi/rebuild_hashtable.
+; Follows the tablet's rotation (portrait and landscape).
 ; Tested on 3.28.0.172. The 3.29 lines are prepared for the next update and are
 ; untested: on 3.29 notebooks open through windowNavigator ("legacydevice/window/main").
 
@@ -54,8 +55,47 @@ AFFECT /qml/device/view/main/MainView.qml
                 Item {
                     id: qn
                     objectName: "quickNotesOverlay"
-                    anchors.fill: parent
                     z: 999999
+                    transformOrigin: Item.TopLeft
+                    width: parent ? parent.width : 0
+                    height: parent ? parent.height : 0
+
+                    // ---------- follow the tablet's rotation ----------
+                    // The overlay copies the position, size and rotation of the
+                    // reMarkable's main view, so "bottom-left" is always the
+                    // bottom-left of what you see, in portrait or landscape.
+                    property int uiAngle: -1
+
+                    function syncOrientation() {
+                        var host = parent;
+                        if (!host) return;
+                        var p0 = root.mapToItem(host, 0, 0);
+                        var p1 = root.mapToItem(host, 100, 0);
+                        var deg = Math.atan2(p1.y - p0.y, p1.x - p0.x) * 180 / Math.PI;
+                        var ang = ((Math.round(deg / 90) * 90) % 360 + 360) % 360;
+                        var w = root.width;
+                        var h = root.height;
+                        if (!(w > 0) || !(h > 0)) {
+                            w = host.width; h = host.height; ang = 0; p0 = { x: 0, y: 0 };
+                        }
+                        if (ang === uiAngle && x === p0.x && y === p0.y && width === w && height === h) return;
+                        x = p0.x;
+                        y = p0.y;
+                        width = w;
+                        height = h;
+                        rotation = ang;
+                        uiAngle = ang;
+                        if (open) closeAll();
+                        console.log("[quicknotes] orientation " + ang + " view " + Math.round(w) + "x" + Math.round(h)
+                                    + " window " + Math.round(host.width) + "x" + Math.round(host.height));
+                    }
+
+                    Timer {
+                        interval: 1000
+                        running: true
+                        repeat: true
+                        onTriggered: { qn.syncOrientation(); }
+                    }
 
                     readonly property int maxSlots: 5
                     readonly property string dataDir: "/home/root/.local/share/quicknotes"
@@ -64,8 +104,9 @@ AFFECT /qml/device/view/main/MainView.qml
 
                     readonly property real unit: Math.min(width, height) / 10
                     readonly property real hotspot: unit * 0.85
-                    readonly property real bubble: unit * 1.2
-                    readonly property real fanRadius: unit * 3.3
+                    readonly property real bubble: unit * 1.1
+                    readonly property real fanRadius: unit * 5.0
+                    readonly property real fanInset: unit * 0.75
 
                     property bool open: false
                     property int menuIndex: -1
@@ -245,7 +286,7 @@ AFFECT /qml/device/view/main/MainView.qml
                         }
                     }
 
-                    Component.onCompleted: loadSlots()
+                    Component.onCompleted: { loadSlots(); syncOrientation(); }
 
                     // ---------- corner hotspot (finger only) ----------
                     Item {
@@ -287,7 +328,7 @@ AFFECT /qml/device/view/main/MainView.qml
                     // ---------- the fan ----------
                     Rectangle {
                         visible: (qn.open && !qn.pickerOpen && qn.renameIndex < 0)
-                        width: (qn.fanRadius + qn.bubble) * 2
+                        width: (qn.fanRadius + qn.fanInset * 1.5 + qn.bubble * 0.7) * 2
                         height: width
                         radius: width / 2
                         x: -width / 2
@@ -308,8 +349,8 @@ AFFECT /qml/device/view/main/MainView.qml
                             width: qn.bubble
                             height: qn.bubble
                             radius: width / 2
-                            x: qn.unit * 0.35 + qn.fanRadius * Math.cos(angle) - width / 2
-                            y: qn.height - qn.unit * 0.35 - qn.fanRadius * Math.sin(angle) - height / 2
+                            x: qn.fanInset + qn.fanRadius * Math.cos(angle) - width / 2
+                            y: qn.height - qn.fanInset - qn.fanRadius * Math.sin(angle) - height / 2
                             color: (isPlus || isSelected) ? "#ffffff" : "#000000"
                             border.width: isSelected ? 6 : 3
                             border.color: "#000000"
@@ -355,8 +396,8 @@ AFFECT /qml/device/view/main/MainView.qml
                         visible: (qn.open && qn.menuIndex >= 0 && qn.renameIndex < 0 && !qn.pickerOpen)
                         width: qn.unit * 4.2
                         height: menuColumn.height + qn.unit * 0.6
-                        x: qn.fanRadius + qn.bubble * 1.4
-                        y: qn.height - height - qn.unit * 0.6
+                        x: (qn.width - width) / 2
+                        y: qn.height * 0.2
                         radius: qn.unit * 0.2
                         color: "#ffffff"
                         border.width: 3
